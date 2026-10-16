@@ -62,11 +62,15 @@ export function filterDeals(cfg) {
   return { total: deals.length, ...stats };
 }
 
+// --deal: пройти по одной сделке. Принимает номер из CRM (31236177) или ext_id (amo:31236177).
+const dealClause = (deal) => deal ? { sql: ` AND (ext_id = ? OR ext_id LIKE ?)`, args: [String(deal), `%:${deal}`] } : { sql: '', args: [] };
+
 // ---------- 2. жива ли компания ----------
 
-export async function checkDeals(cfg, { limit = Infinity } = {}) {
+export async function checkDeals(cfg, { limit = Infinity, deal } = {}) {
+  const only = dealClause(deal);
   const todo = all(`SELECT id, domain, inn, country FROM deals
-                    WHERE filter_status = 'in' AND check_status = 'pending' LIMIT ?`, Number.isFinite(limit) ? limit : -1);
+                    WHERE filter_status = 'in' AND check_status = 'pending'${only.sql} LIMIT ?`, ...only.args, Number.isFinite(limit) ? limit : -1);
   const stats = { checked: 0, alive: 0, dead: 0, parked: 0, liquidated: 0, warnings: new Set() };
   const wantRegistry = cfg.country !== 'other';
 
@@ -134,10 +138,11 @@ function pickContext(json) {
   return { reason: c.reason, promise: c.promise, promise_date: c.promise_date, look_for: c.look_for, angle: c.angle };
 }
 
-export function batchNext(stage, size) {
+export function batchNext(stage, size, { deal } = {}) {
   const st = STAGES[stage];
   if (!st) throw new Error(`Шаг «${stage}» не знаю. Есть: ${Object.keys(STAGES).join(', ')}`);
-  const deals = all(`SELECT * FROM deals WHERE ${st.where} AND batch_id IS NULL ORDER BY closed_at DESC LIMIT ?`, size);
+  const only = dealClause(deal);
+  const deals = all(`SELECT * FROM deals WHERE ${st.where} AND batch_id IS NULL${only.sql} ORDER BY closed_at DESC LIMIT ?`, ...only.args, size);
   if (!deals.length) return null;
   fs.mkdirSync(WORK, { recursive: true });
   const n = (get('SELECT COUNT(*) n FROM batches').n + 1).toString().padStart(3, '0');
@@ -166,7 +171,7 @@ export function batchSave(resultFile) {
   if (!batch) throw new Error(`Пачки ${id} нет в базе`);
   const ids = new Set(JSON.parse(batch.deal_ids));
   const { rows, bad } = readJsonl(abs);
-  let saved = 0;
+  let saved = 0, noSource = 0;
   const rejected = [];
   const missing = new Set(ids);
 
@@ -178,8 +183,12 @@ export function batchSave(resultFile) {
         run(`UPDATE deals SET context = ?, context_status = 'done', batch_id = NULL, updated_at = ? WHERE id = ?`,
           JSON.stringify(r), now(), r.id);
       } else if (batch.stage === 'signals') {
+        // сигнал без ссылки на источник не считается: проверить его нельзя
+        const raw = Array.isArray(r.signals) ? r.signals : [];
+        const ok = raw.filter((g) => /^https?:\/\/\S+\.\S+/.test(String(g?.url ?? '').trim()));
+        noSource += raw.length - ok.length;
         run(`UPDATE deals SET signals = ?, signals_status = 'done', batch_id = NULL, updated_at = ? WHERE id = ?`,
-          JSON.stringify(Array.isArray(r.signals) ? r.signals : []), now(), r.id);
+          JSON.stringify(ok), now(), r.id);
       } else if (batch.stage === 'letters') {
         const problem = letterProblem(r, r.id);
         if (problem) {
@@ -196,7 +205,7 @@ export function batchSave(resultFile) {
     for (const d of missing) run('UPDATE deals SET batch_id = NULL WHERE id = ?', d);
     run(`UPDATE batches SET status = 'saved' WHERE id = ?`, id);
   });
-  return { id, stage: batch.stage, saved, rejected, missing: missing.size, badLines: bad.length };
+  return { id, stage: batch.stage, saved, rejected, noSource, missing: missing.size, badLines: bad.length };
 }
 
 export function batchReset() {
@@ -206,6 +215,41 @@ export function batchReset() {
     run(`UPDATE batches SET status = 'saved' WHERE status = 'open'`);
   });
   return open.length;
+}
+
+// Источники сигналов — чтобы менеджер мог открыть и проверить, откуда повод.
+export function signalSources(signalsJson) {
+  const sig = signalsJson ? JSON.parse(signalsJson) : [];
+  return sig.filter((g) => g.url).map((g) => `- ${g.summary ?? g.type}${g.date ? ` (${g.date})` : ''}: ${g.url}`).join('\n');
+}
+
+// Всё, что агент выяснил о сделке, — с источником у каждого факта.
+// Идёт в комментарий к сделке в CRM и в итоговую таблицу.
+export function findings(d) {
+  const ctx = d.context ? JSON.parse(d.context) : {};
+  const out = [];
+  const site = d.final_domain || d.domain;
+  if (d.check_note) out.push(`Сайт: ${d.check_note.split('; ')[0]}${site ? ` — https://${site}` : ''}`);
+  if (d.registry) out.push(`${d.registry} (ИНН ${d.inn}, данные DaData; проверить: https://egrul.nalog.ru)`);
+  if (d.revenue) {
+    const rev = JSON.parse(d.revenue);
+    if (rev.note) out.push(`${rev.note[0].toUpperCase()}${rev.note.slice(1)} (ИНН ${d.inn}, данные DataNewton: https://datanewton.ru)`);
+  }
+  if (ctx.reason) out.push(`Почему проиграли: ${ctx.reason} (из истории сделки)`);
+  if (ctx.promise) out.push(`Обещанный повод: ${ctx.promise}${ctx.promise_date ? `, срок ${ctx.promise_date.split('-').reverse().join('.')}` : ''} (из истории сделки)`);
+  const sig = d.signals ? JSON.parse(d.signals) : [];
+  for (const g of sig) out.push(`Сигнал: ${g.summary ?? g.type}${g.date ? ` (${g.date.split('-').reverse().join('.')})` : ''} — ${g.url}`);
+  return out;
+}
+
+// Итог одной строкой: что агент решил по сделке.
+export function verdict(d, cfg) {
+  if (['dead', 'parked', 'liquidated'].includes(d.check_status)) return 'компания, похоже, закрылась — не возвращаемся';
+  const ctx = d.context ? JSON.parse(d.context) : {};
+  if (ctx.reactivatable === false) return `не возвращаемся: ${ctx.why_not || ctx.reason || 'по истории'}`;
+  if (d.score != null && d.score >= cfg.min_score) return `есть повод вернуться (${d.score} балл.)`;
+  if (d.signals_status === 'done') return 'пока тихо: свежего повода не нашлось, проверим снова через месяц';
+  return '';
 }
 
 // ---------- 5. баллы ----------
@@ -240,7 +284,7 @@ export function scoreDeals(cfg) {
         const type = g.type in w ? g.type : 'other';
         const weight = type === 'other' ? 1 : (w[type] ?? 0);
         const strength = Math.max(1, Math.min(3, Number(g.strength) || 1));
-        add(type, Math.round(weight * strength / 2 * 10) / 10, g.summary ? g.summary.slice(0, 90) : type);
+        add(type, Math.round(weight * strength / 2 * 10) / 10, g.summary ? String(g.summary).trim() : type);
       }
       const parts = [...best.values()].sort((a, b) => b.pts - a.pts);
       const s = Math.round(parts.reduce((a, p) => a + p.pts, 0) * 10) / 10;
@@ -254,10 +298,11 @@ export function scoreDeals(cfg) {
 
 // ---------- 6. письма ----------
 
-export function lettersNext(cfg, size) {
+export function lettersNext(cfg, size, { deal } = {}) {
+  const only = dealClause(deal);
   const deals = all(`SELECT * FROM deals
-                     WHERE filter_status = 'in' AND check_status = 'alive' AND score >= ? AND letter_status = 'none' AND batch_id IS NULL
-                     ORDER BY score DESC LIMIT ?`, cfg.min_score, size);
+                     WHERE filter_status = 'in' AND check_status = 'alive' AND score >= ? AND letter_status = 'none' AND batch_id IS NULL${only.sql}
+                     ORDER BY score DESC LIMIT ?`, cfg.min_score, ...only.args, size);
   if (!deals.length) return null;
   fs.mkdirSync(WORK, { recursive: true });
   const n = (get('SELECT COUNT(*) n FROM batches').n + 1).toString().padStart(3, '0');
@@ -294,13 +339,14 @@ function letterProblem(r, id) {
 }
 
 export function lettersReview() {
-  const drafts = all(`SELECT id, company, score_note, letter_subject, letter_body FROM deals WHERE letter_status = 'draft' ORDER BY score DESC`);
+  const drafts = all(`SELECT id, company, score_note, signals, letter_subject, letter_body FROM deals WHERE letter_status = 'draft' ORDER BY score DESC`);
   fs.mkdirSync(OUT, { recursive: true });
   const file = path.join(OUT, 'письма-на-проверку.md');
   const md = ['# Письма на проверку', '',
     'Вместо {{имя}} при отправке подставится имя контакта из CRM. Чтобы утвердить —',
     'напишите ассистенту «утверждаю все» или номера писем, которые убрать.', '',
     ...drafts.flatMap((d) => [`## №${d.id} · ${d.company}`, '', `**Почему сейчас:** ${d.score_note}`, '',
+      ...(signalSources(d.signals) ? ['**Источники:**', signalSources(d.signals), ''] : []),
       `**Тема:** ${d.letter_subject}`, '', d.letter_body, '', '---', ''])];
   fs.writeFileSync(file, md.join('\n'));
   return { file: path.relative(ROOT, file), count: drafts.length };
@@ -357,6 +403,8 @@ export function exportSummary() {
       'Обещанный повод': [ctx.promise, ctx.promise_date].filter(Boolean).join(' — '),
       'Баллы': d.score ?? '',
       'Почему сейчас': d.score_note ?? '',
+      'Что нашёл агент (с источниками)': findings(d).join('\n'),
+      'Источники': signalSources(d.signals),
       'Письмо': { none: '', draft: 'черновик', approved: 'утверждено', rejected: 'отклонено', sent: 'отправлено' }[d.letter_status],
       'Ответственный': d.owner,
       'ID сделки': d.ext_id.replace(/^[a-z]+:/, ''),

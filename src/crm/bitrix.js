@@ -160,6 +160,11 @@ export async function exportLost(cfg, log = console.log) {
   });
 }
 
+// Комментарий в ленту сделки: что нашёл агент, с источниками.
+export async function addNote({ dealId, text }) {
+  await call('crm.timeline.comment.add', { fields: { ENTITY_ID: dealId.replace(/^b24:/, ''), ENTITY_TYPE: 'deal', COMMENT: text } });
+}
+
 // Задача ответственному по сделке — с поводом и готовым письмом в описании.
 export async function createTask({ dealId, ownerId, title, text }) {
   const id = dealId.replace(/^b24:/, '');

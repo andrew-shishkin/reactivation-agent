@@ -31,6 +31,7 @@ export const DEFAULTS = {
     codex: { cheap: '', strong: '' }, // ассистент вписывает по списку моделей в Codex
   },
   delivery: { mode: 'file', daily_limit: 30, bcc_self: true },  // file | crm | email
+  crm_notes: true,                    // записывать найденное комментарием в карточку сделки (Битрикс24, amoCRM)
   crm_fields: { loss_reason: '', inn: '', site: '' },           // коды своих полей в CRM, если есть
 };
 

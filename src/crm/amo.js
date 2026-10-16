@@ -126,6 +126,11 @@ export async function exportLost(cfg, log = console.log) {
   });
 }
 
+// Примечание в карточку сделки: что нашёл агент, с источниками.
+export async function addNote({ dealId, text }) {
+  await call('/leads/notes', { method: 'POST', body: [{ entity_id: Number(dealId.replace(/^amo:/, '')), note_type: 'common', params: { text } }] });
+}
+
 export async function createTask({ dealId, ownerId, title, text }) {
   const id = Number(dealId.replace(/^amo:/, ''));
   await call('/tasks', {

@@ -71,6 +71,11 @@ export function openDb() {
       deal_ids    TEXT
     );
   `);
+  // базы, созданные до появления колонок, дополняем на месте
+  const cols = new Set(db.prepare('PRAGMA table_info(deals)').all().map((c) => c.name));
+  for (const [c, type] of [['crm_note_hash', 'TEXT'], ['crm_noted_at', 'TEXT']]) {
+    if (!cols.has(c)) db.exec(`ALTER TABLE deals ADD COLUMN ${c} ${type}`);
+  }
   return db;
 }
 

@@ -16,6 +16,7 @@
 //   node run.js letters approve all|1,2,3   утвердить
 //   node run.js letters reject 1,2,3        отклонить
 //   node run.js deliver [--limit N]         выдать утверждённые: файл, CRM или почта
+//   node run.js notes [--deal N]            записать найденное комментарием в карточки сделок в CRM
 //   node run.js recheck [--days 30]         снова искать поводы у тех, у кого их не было
 //   node run.js export                      итоговая таблица без персональных данных
 //   node run.js status                      сколько на каком шаге
@@ -26,7 +27,7 @@ import { loadEnv, has, die, ROOT } from './src/env.js';
 import { loadConfig, CONFIG_FILE } from './src/config.js';
 import { importFile, saveDeals } from './src/importer.js';
 import * as st from './src/stages.js';
-import { deliverFile, deliverCrm, deliverEmail, sentToday } from './src/deliver.js';
+import { deliverFile, deliverCrm, deliverEmail, sentToday, pushNotes } from './src/deliver.js';
 import { writeCsv } from './src/table.js';
 
 loadEnv();
@@ -85,7 +86,7 @@ try {
     }
 
     case 'check': {
-      const r = await st.checkDeals(cfg, { limit: opt('limit') ? Number(opt('limit')) : Infinity });
+      const r = await st.checkDeals(cfg, { limit: opt('limit') ? Number(opt('limit')) : Infinity, deal: opt('deal') });
       say(`Проверено: ${r.checked}. Живые: ${r.alive}, сайт не открывается: ${r.dead}, домен припаркован: ${r.parked}, ликвидированы: ${r.liquidated}`);
       if (r.left) say(`Осталось проверить: ${r.left}`);
       for (const w of r.warnings) say(`  ! ${w}`);
@@ -97,7 +98,7 @@ try {
       if (sub === 'next') {
         const stage = rest[0];
         const size = Number(opt('size')) || cfg.batch[stage] || 20;
-        const b = st.batchNext(stage, size);
+        const b = st.batchNext(stage, size, { deal: opt('deal') });
         if (!b) { say(`Для шага «${stage}» больше ничего нет.`); break; }
         say(`Пачка ${b.id}: ${b.count} сделок`);
         say(`  читать: ${b.file}`);
@@ -106,6 +107,7 @@ try {
         const r = st.batchSave(rest[0]);
         say(`Пачка ${r.id} (${r.stage}): сохранено ${r.saved}${r.missing ? `, без ответа ${r.missing} — вернутся в следующую пачку` : ''}${r.badLines ? `, непонятных строк ${r.badLines}` : ''}`);
         for (const x of r.rejected) say(`  ! письмо не принято, ${x} — вернётся в следующую пачку писем`);
+        if (r.noSource) say(`  ! сигналов без ссылки на источник отброшено: ${r.noSource}`);
       } else if (sub === 'reset') {
         say(`Отпущено пачек: ${st.batchReset()}`);
       } else die('batch next <шаг> | batch save <файл> | batch reset');
@@ -120,7 +122,7 @@ try {
 
     case 'letters': {
       if (sub === 'next') {
-        const b = st.lettersNext(cfg, Number(opt('size')) || cfg.letters_per_pass);
+        const b = st.lettersNext(cfg, Number(opt('size')) || cfg.letters_per_pass, { deal: opt('deal') });
         if (!b) { say('Новых писем писать не по кому.'); break; }
         say(`Пачка ${b.id}: ${b.count} писем`);
         say(`  читать: ${b.file}`);
@@ -151,6 +153,13 @@ try {
         if (r.noEmail) say(`  у ${r.noEmail} контактов нет почты — они в файле через --mode file`);
         for (const e of r.errors ?? []) say(`  ! ${e}`);
       } else die('Способ выдачи: file, crm или email');
+      break;
+    }
+
+    case 'notes': {
+      const r = await pushNotes(cfg, { deal: opt('deal') });
+      say(r.note ?? `Комментариев в карточки сделок записано: ${r.count}${r.skipped ? `, без изменений с прошлого раза: ${r.skipped}` : ''}`);
+      for (const e of r.errors ?? []) say(`  ! ${e}`);
       break;
     }
 

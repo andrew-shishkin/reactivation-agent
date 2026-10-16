@@ -9,7 +9,8 @@ import os from 'node:os';
 import { env, has, scrub } from './env.js';
 import { all, get, run, now } from './db.js';
 import { writeCsv } from './table.js';
-import { OUT } from './stages.js';
+import { OUT, signalSources, findings, verdict } from './stages.js';
+import crypto from 'node:crypto';
 import { ROOT } from './env.js';
 
 // «Здравствуйте, {{имя}}!» без имени превращается в «Здравствуйте!»
@@ -54,6 +55,7 @@ export function deliverFile() {
     'Тема': merge(d.letter_subject, { name: d.c_name, company: d.company }),
     'Письмо': merge(d.letter_body, { name: d.c_name, company: d.company }),
     'Почему сейчас': d.score_note,
+    'Источники': signalSources(d.signals),
     'Ответственный': d.owner,
     'ID сделки': d.ext_id.replace(/^[a-z0-9]+:/, ''),
   })));
@@ -79,13 +81,47 @@ export async function deliverCrm(cfg) {
         dealId: d.ext_id,
         ownerId: d.owner_id,
         title: `Реактивация: ${d.company}`,
-        text: `Почему сейчас: ${d.score_note}\nКому: ${d.c_name || 'контакт по сделке'}\n\nЧерновик письма:\n${letter}`,
+        text: `Почему сейчас: ${d.score_note}${signalSources(d.signals) ? `\n\nИсточники:\n${signalSources(d.signals)}` : ''}\n\nКому: ${d.c_name || 'контакт по сделке'}\n\nЧерновик письма:\n${letter}`,
       });
       run(`UPDATE deals SET letter_status = 'sent', delivered_at = ?, delivery_note = ? WHERE id = ?`, now(), 'задача в CRM', d.id);
       done++;
     } catch (e) { errors.push(`${d.company}: ${scrub(e.message)}`); }
   }
   return { count: done, errors };
+}
+
+// ---------- что нашёл агент — комментарием в карточку сделки ----------
+
+// Пишем один раз, когда по сделке всё выяснено: компания отпала на проверке,
+// история показала, что возвращаться не к чему, или сигналы уже поискали.
+// Повторно — только если что-то изменилось (например, при перепроверке через месяц).
+// В CRM только добавляется комментарий: поля, стадии и сама сделка не меняются.
+export async function pushNotes(cfg, { deal } = {}) {
+  if (!cfg.crm_notes) return { count: 0, note: 'Запись в карточки выключена в настройках (crm_notes).' };
+  const mod = cfg.source === 'bitrix' ? await import('./crm/bitrix.js') : cfg.source === 'amo' ? await import('./crm/amo.js') : null;
+  if (!mod) return { count: 0, note: 'Комментарии в карточки пишутся для Битрикс24 и amoCRM. Для сделок из файла всё найденное — в out/итог.csv.' };
+  const prefix = cfg.source === 'bitrix' ? 'b24:' : 'amo:';
+  const rows = all(`SELECT * FROM deals WHERE ext_id LIKE ? AND filter_status = 'in' AND (
+                      check_status IN ('dead', 'parked', 'liquidated')
+                      OR json_extract(context, '$.reactivatable') = 0
+                      OR signals_status = 'done')
+                    ${deal ? `AND (ext_id = ? OR ext_id LIKE ?)` : ''}`,
+  prefix + '%', ...(deal ? [String(deal), `%:${deal}`] : []));
+  let count = 0, skipped = 0; const errors = [];
+  const date = new Date().toISOString().slice(0, 10).split('-').reverse().join('.');
+  for (const d of rows) {
+    const facts = findings(d);
+    const v = verdict(d, cfg);
+    const body = [...facts, ...(v ? [`Итог: ${v}`] : [])].join('\n');
+    const hash = crypto.createHash('sha1').update(body).digest('hex');
+    if (!facts.length || hash === d.crm_note_hash) { skipped++; continue; }
+    try {
+      await mod.addNote({ dealId: d.ext_id, text: `Агент реактивации, ${date}\n\n${body}` });
+      run('UPDATE deals SET crm_note_hash = ?, crm_noted_at = ? WHERE id = ?', hash, now(), d.id);
+      count++;
+    } catch (e) { errors.push(`${d.company}: ${scrub(e.message)}`); }
+  }
+  return { count, skipped, errors };
 }
 
 // ---------- отправка с вашей почты ----------
