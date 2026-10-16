@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node run.js:*)",
+      "Bash(node --version)",
+      "Bash(node -v)",
+      "Read(./work/**)",
+      "Read(./my/**)",
+      "Read(./agents/**)",
+      "Edit(./work/**)",
+      "Edit(./my/**)",
+      "WebSearch",
+      "WebFetch"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./state/**)",
+      "Read(./out/к-отправке*)"
+    ]
+  }
+}

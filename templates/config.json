@@ -1,0 +1,25 @@
+{
+  "source": "file",
+  "lost_stage": "",
+  "window_months": [6, 18],
+  "exclude_reasons": ["дубл", "спам", "тест", "нецелев", "ошибочн"],
+  "country": "RU",
+  "signals": {
+    "promise": 5,
+    "hiring": 3,
+    "new_product": 3,
+    "expansion": 3,
+    "leadership_change": 3,
+    "growth": 2,
+    "domain_change": 2
+  },
+  "min_score": 3,
+  "batch": { "context": 25, "signals": 10, "parallel": 5 },
+  "letters_per_pass": 20,
+  "models": {
+    "claude": { "cheap": "haiku", "strong": "sonnet" },
+    "codex": { "cheap": "", "strong": "" }
+  },
+  "delivery": { "mode": "file", "daily_limit": 30, "bcc_self": true },
+  "crm_fields": { "loss_reason": "", "inn": "", "site": "" }
+}

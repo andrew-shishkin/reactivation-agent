@@ -1,0 +1,8 @@
+{
+  "name": "reactivation-agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Агент реактивации закрытой базы для Claude Code и Codex",
+  "engines": { "node": ">=22" }
+}

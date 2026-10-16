@@ -1,0 +1,6 @@
+.env
+my/
+state/
+work/
+out/
+.DS_Store
